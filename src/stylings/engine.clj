@@ -41,51 +41,37 @@
 (defn filter-structure [structure]
   (struct/get-structure structure))
 
-(defn start [seeds parallelism output]
-  (let [input (async/chan parallelism (distinct))]
-    (letfn [(process-page [url]
-              (println "now processing: " url)
-              (try
-                (let [structure (get-html url)
-                      links     (extract-links url structure)]
-                  (when (not-empty links)
-                    (async/onto-chan input links false))
-                  (filter-structure structure))
-                (catch Exception e
-                  {:error (.getMessage e)})))]
-      (let [xf (map (juxt identity (memoize process-page)))]
-        (async/pipeline-blocking parallelism output xf input))
-      (async/onto-chan input seeds false)
-      output)))
+(defn start [seeds parallelism input output]
+  (letfn [(process-page [url]
+            (println "now processing: " url)
+            (try
+              (let [structure (get-html url)
+                    links     (extract-links url structure)]
+                (when (not-empty links)
+                  (async/onto-chan input links false))
+                (filter-structure structure))
+              (catch Exception e
+                {:error (.getMessage e)})))]
+    (let [xf (map (juxt identity (memoize process-page)))]
+      (async/pipeline-blocking parallelism output xf input))
+    (async/onto-chan input seeds false)
+    output))
 
 (defn collect
   "Returns a map of url -> tag structure by crawling the web
   beginning with the provided seed urls and expanding links within
   each scraped page."
   [seeds max-size]
-  (let [result-ch (async/chan)
+  (let [parallelism 1
+        input-ch  (async/chan parallelism)
+        result-ch (async/chan parallelism)
         aggregate (atom {})]
-    (start seeds 4 result-ch)
+    (start seeds parallelism input-ch result-ch)
     (async/<!!
       (async/go-loop []
         (when-some [[k v] (async/<! result-ch)]
           (let [results (swap! aggregate assoc k v)]
-            (if (> (count results) max-size)
-              (do (async/close! result-ch) @aggregate)
+            (if (>= (count results) max-size)
+              (do (async/close! input-ch) @aggregate)
               (recur))))))))
 
-
-(defn search [db s]
-  (letfn [(subtrees [x]
-            )
-          (jaccard [x y]
-            (/ (count (sets/intersection x y))
-               (count (sets/union x y))))]
-    (let [s* (subtrees s)]
-      (->> (seq db)
-           (map (fn [[k v]]
-                  (let [v* (subtrees v)]
-                    {:url       k
-                     :structure v
-                     :score     (jaccard v* s*)})))
-           (sort-by :score)))))
